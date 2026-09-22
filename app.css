@@ -149,7 +149,7 @@ button, input, select, textarea{ font-family: inherit; color: inherit; }
 }
 .tab.active{ color: var(--text); background: var(--bg); box-shadow: inset 0 -2px 0 var(--accent-2); }
 
-.editor-host{ flex:1; min-height:0; overflow:hidden; background: var(--bg); }
+.editor-host{ flex:1; min-height:200px; overflow:hidden; background: var(--bg); position:relative; }
 .editor-host .cm-editor{ height:100%; }
 .editor-host .cm-scroller{ overflow:auto; }
 
