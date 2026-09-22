@@ -92,7 +92,7 @@ jobs:
           curl -sS -X POST "$RELAY_URL/job/$JOB_ID/stage" \
             -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
             -d '{"stage":"Installing libraries"}'
-          while IFS= read -r lib; do
+          while IFS= read -r lib || [ -n "$lib" ]; do
             [ -z "$lib" ] && continue
             arduino-cli lib install "$lib"
           done < libs.txt
