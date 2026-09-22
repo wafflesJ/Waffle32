@@ -326,7 +326,7 @@ function editorExtensions() {
     keymap.of([indentWithTab]), // Tab/Shift+Tab indent-select; not in basicSetup by default
     cpp(),
     vsDarkUi,
-    syntaxHighlighting(vsDarkHighlight, { fallback: true }),
+    syntaxHighlighting(vsDarkHighlight),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) {
         const f = activeFile();
