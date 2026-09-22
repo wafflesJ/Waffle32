@@ -1,0 +1,147 @@
+name: Compile ESP32 sketch
+
+# The Worker triggers this by calling the GitHub API with a job_id.
+# It never runs on push, so pushing to your site does not use build minutes.
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id issued by the relay Worker"
+        required: true
+
+# Only one build at a time; a second job waits instead of racing this one.
+concurrency:
+  group: esp-build
+  cancel-in-progress: false
+
+env:
+  RELAY_URL: ${{ vars.RELAY_URL }}
+  RELAY_SECRET: ${{ secrets.RELAY_SECRET }}
+  JOB_ID: ${{ inputs.job_id }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Report stage
+        run: |
+          curl -sS -X POST "$RELAY_URL/job/$JOB_ID/stage" \
+            -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
+            -d '{"stage":"Fetching your sketch"}'
+
+      - name: Fetch the job
+        id: job
+        run: |
+          curl -sS -f "$RELAY_URL/job/$JOB_ID" -H "X-Relay-Secret: $RELAY_SECRET" -o job.json \
+            || { echo "Could not fetch job $JOB_ID (it may have expired)"; exit 1; }
+          python3 -c "
+          import json
+          job = json.load(open('job.json'))
+          open('fqbn.txt', 'w').write(job['fqbn'])
+          open('libs.txt', 'w').write('\n'.join(job.get('libs', [])))
+          "
+          echo "fqbn: $(cat fqbn.txt)"
+          echo "libs: $(cat libs.txt)"
+
+      - name: Write the sketch to disk
+        run: |
+          python3 <<'PY'
+          import json, os, re
+
+          job = json.load(open("job.json"))
+          files = job["files"]
+          ino = [f for f in files if f["name"].lower().endswith(".ino")]
+          if len(ino) != 1:
+              raise SystemExit(f"Expected exactly one .ino file, found {len(ino)}")
+
+          # Arduino requires the sketch folder to be named after the main .ino file.
+          folder = re.sub(r"\.ino$", "", ino[0]["name"], flags=re.I)
+          os.makedirs(f"sketch/{folder}", exist_ok=True)
+          for f in files:
+              path = os.path.join("sketch", folder, f["name"])
+              with open(path, "w", encoding="utf-8", newline="\n") as out:
+                  out.write(f["content"])
+
+          with open("sketch_dir.txt", "w") as out:
+              out.write(f"sketch/{folder}")
+          PY
+          echo "SKETCH_DIR=$(cat sketch_dir.txt)" >> "$GITHUB_ENV"
+
+      - name: Cache the Arduino ESP32 core and toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.arduino15
+          # Bump this key (e.g. -v2) if you ever change the pinned esp32 core version below.
+          key: arduino15-esp32-3.3.12-v1
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install the ESP32 core (skips if already cached)
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls \
+            https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          # Pinned version. Bump deliberately, together with the cache key above.
+          arduino-cli core install esp32:esp32@3.3.12
+
+      - name: Install requested libraries
+        run: |
+          curl -sS -X POST "$RELAY_URL/job/$JOB_ID/stage" \
+            -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
+            -d '{"stage":"Installing libraries"}'
+          while IFS= read -r lib; do
+            [ -z "$lib" ] && continue
+            arduino-cli lib install "$lib"
+          done < libs.txt
+
+      - name: Compile
+        id: compile
+        run: |
+          curl -sS -X POST "$RELAY_URL/job/$JOB_ID/stage" \
+            -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
+            -d '{"stage":"Compiling"}'
+          FQBN=$(cat fqbn.txt)
+          set +e
+          arduino-cli compile --fqbn "$FQBN" --build-path build --export-binaries "$SKETCH_DIR" \
+            > compile.log 2>&1
+          echo "result=$?" >> "$GITHUB_OUTPUT"
+          cat compile.log
+
+      - name: Package the firmware
+        if: steps.compile.outputs.result == '0'
+        run: |
+          MERGED=$(ls build/*.merged.bin | head -n1)
+          cp "$MERGED" firmware.bin
+          curl -sS -f -X PUT "$RELAY_URL/job/$JOB_ID/firmware" \
+            -H "X-Relay-Secret: $RELAY_SECRET" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @firmware.bin
+
+      - name: Report success
+        if: steps.compile.outputs.result == '0'
+        run: |
+          export LOG
+          LOG=$(tail -c 4000 compile.log)
+          python3 -c "
+          import json, os
+          print(json.dumps({'ok': True, 'log': os.environ['LOG']}))
+          " > finish.json
+          curl -sS -X POST "$RELAY_URL/job/$JOB_ID/finish" \
+            -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
+            --data-binary @finish.json
+
+      - name: Report failure
+        if: always() && steps.compile.outputs.result != '0'
+        run: |
+          export LOG
+          LOG=$(tail -c 8000 compile.log 2>/dev/null || echo "The build did not produce a log.")
+          python3 -c "
+          import json, os
+          print(json.dumps({'ok': False, 'log': os.environ['LOG']}))
+          " > finish.json
+          curl -sS -X POST "$RELAY_URL/job/$JOB_ID/finish" \
+            -H "X-Relay-Secret: $RELAY_SECRET" -H "Content-Type: application/json" \
+            --data-binary @finish.json
