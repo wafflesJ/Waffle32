@@ -46,13 +46,11 @@ const BOARDS = [
 
 const DEFAULT_SKETCH = `void setup() {
   Serial.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
+  
 }
 
 void loop() {
-  digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-  Serial.println("hello from Waffle32");
-  delay(500);
+  
 }
 `;
 
@@ -62,7 +60,7 @@ const STORAGE_KEY = "waffle32:project";
 // Project state.
 // ---------------------------------------------------------------------
 let project = loadProject() || {
-  name: "my-project",
+  name: "project",
   board: "esp32",
   cdc: false,
   partition: "default",
@@ -399,7 +397,7 @@ function addFile(name) {
 // ---------------------------------------------------------------------
 projectNameInput.value = project.name;
 projectNameInput.addEventListener("input", () => {
-  project.name = projectNameInput.value || "my-project";
+  project.name = projectNameInput.value || "project";
   saveProject();
 });
 
@@ -444,7 +442,7 @@ newFileNameInput.addEventListener("keydown", (ev) => {
 el("btn-new").addEventListener("click", () => {
   if (!confirm("Start a new blank project? This replaces everything currently open.")) return;
   project = {
-    name: "my-project",
+    name: "project",
     board: "esp32",
     cdc: false,
     partition: "default",

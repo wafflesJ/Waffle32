@@ -20,10 +20,10 @@
     <span class="brand-mark" aria-hidden="true"></span>
     <span class="brand-name">Waffle32</span>
   </div>
-  <input id="project-name" class="project-name" value="my-project" spellcheck="false" aria-label="Project name" />
+  <input id="project-name" class="project-name" value="project" spellcheck="false" aria-label="Project name" />
   <div class="topbar-actions">
     <button id="btn-new" class="btn btn-ghost" title="Start a blank project">New</button>
-    <button id="btn-export" class="btn btn-ghost" title="Download this project as a .zip">Export .zip</button>
+    <button id="btn-export" class="btn btn-ghost" title="Download this project as a .zip">Export</button>
     <button id="btn-import" class="btn btn-ghost" title="Load a project from a .zip or files">Import</button>
     <input id="file-import-input" type="file" accept=".zip,.ino,.cpp,.c,.h,.hpp" multiple hidden />
   </div>
@@ -59,7 +59,7 @@
       <h2>Libraries</h2>
       <p class="hint">Arduino library names, installed by name during the build.</p>
       <div class="tag-row">
-        <input id="lib-input" placeholder="e.g. ArduinoJson" spellcheck="false" />
+        <input id="lib-input" placeholder="e.g. ESP32Servo" spellcheck="false" />
         <button id="btn-add-lib" class="btn btn-small">Add</button>
       </div>
       <ul id="lib-list" class="tag-list"></ul>
@@ -69,7 +69,7 @@
       <h2>Files</h2>
       <ul id="file-list" class="file-list"></ul>
       <div class="tag-row">
-        <input id="new-file-name" placeholder="helper.cpp" spellcheck="false" />
+        <input id="new-file-name" placeholder="newFile.cpp" spellcheck="false" />
         <button id="btn-add-file" class="btn btn-small">Add file</button>
       </div>
     </section>
