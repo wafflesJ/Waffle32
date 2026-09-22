@@ -11,11 +11,24 @@ import {
 } from "https://unpkg.com/esptool-js@0.7.0/bundle.js";
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 
+// CodeMirror 6, loaded unbundled from jsDelivr's ESM CDN. These are pinned
+// to major version only (not exact patches) so that jsDelivr's internal
+// cross-package dependency resolution — @codemirror/view importing
+// @codemirror/state, etc. — converges on the same resolved module for
+// everyone, which matters because CodeMirror relies on class/Facet
+// identity being consistent across its sub-packages.
+import { EditorView, basicSetup } from "https://cdn.jsdelivr.net/npm/codemirror@6/+esm";
+import { EditorState } from "https://cdn.jsdelivr.net/npm/@codemirror/state@6/+esm";
+import { keymap } from "https://cdn.jsdelivr.net/npm/@codemirror/view@6/+esm";
+import { indentWithTab } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
+import { syntaxHighlighting, HighlightStyle } from "https://cdn.jsdelivr.net/npm/@codemirror/language@6/+esm";
+import { cpp } from "https://cdn.jsdelivr.net/npm/@codemirror/lang-cpp@6/+esm";
+import { tags as t } from "https://cdn.jsdelivr.net/npm/@lezer/highlight@1/+esm";
+
 // ---- point this at your own Worker if you fork this project ----
 const RELAY_URL = "https://esp-relay.waffle32.workers.dev";
 
 // Boards the relay accepts, and whether they have a "USB CDC on boot" option.
-// (The classic ESP32 has no native USB, so it has no such setting.)
 const BOARDS = [
   { id: "esp32", label: "ESP32 Dev Module", cdc: false },
   { id: "esp32s2", label: "ESP32-S2 Dev Module", cdc: true },
@@ -40,8 +53,7 @@ void loop() {
 const STORAGE_KEY = "waffle32:project";
 
 // ---------------------------------------------------------------------
-// Project state. Kept as one plain object and written to localStorage
-// on every change, so a page refresh never loses work.
+// Project state.
 // ---------------------------------------------------------------------
 let project = loadProject() || {
   name: "my-project",
@@ -53,9 +65,9 @@ let project = loadProject() || {
   activeFile: "sketch.ino",
 };
 
-let firmware = null; // { bytes: Uint8Array, board: string } once a build finishes
-let espLoader = null; // connected ESPLoader instance, once "Connect" succeeds
-let monitorPort = null; // raw SerialPort, while the monitor is open
+let firmware = null;
+let espLoader = null;
+let monitorPort = null;
 let monitorAbort = null;
 
 function loadProject() {
@@ -63,7 +75,7 @@ function loadProject() {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
-    return null; // corrupted or blocked storage — start fresh rather than crash
+    return null;
   }
 }
 
@@ -94,8 +106,7 @@ const libList = el("lib-list");
 const fileList = el("file-list");
 const newFileNameInput = el("new-file-name");
 const tabsEl = el("tabs");
-const editor = el("editor");
-const gutter = el("gutter");
+const editorHost = el("editor-host");
 const consoleEl = el("console");
 const buildLight = el("build-light");
 const progressWrap = el("progress");
@@ -106,19 +117,75 @@ const btnFlash = el("btn-flash");
 const btnMonitor = el("btn-monitor");
 
 // ---------------------------------------------------------------------
-// Console log
+// Console log, with ANSI color code support.
+//
+// arduino-cli colors its own output (e.g. the "Used platform / Version /
+// Path" table) with raw ANSI escape sequences, which are meaningless
+// inside HTML — they'd otherwise show up as literal "[92m" text. This
+// converts them into colored spans using VS Code's own default terminal
+// palette, so compiler output looks the way it would in a real terminal.
 // ---------------------------------------------------------------------
+const ANSI_COLORS = {
+  30: "#3b3b3b", 31: "#cd3131", 32: "#0dbc79", 33: "#e5e510",
+  34: "#2472c8", 35: "#bc3fbc", 36: "#11a8cd", 37: "#e5e5e5",
+  90: "#666666", 91: "#f14c4c", 92: "#23d18b", 93: "#f5f543",
+  94: "#3b8eea", 95: "#d670d6", 96: "#29b8db", 97: "#e5e5e5",
+};
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function ansiToHtml(raw) {
+  const parts = raw.split(/\x1b\[([0-9;]*)m/);
+  let html = "";
+  let color = null, bold = false, italic = false, underline = false, dim = false;
+  const openSpan = () => {
+    const styles = [];
+    if (color) styles.push("color:" + color);
+    if (bold) styles.push("font-weight:600");
+    if (italic) styles.push("font-style:italic");
+    if (underline) styles.push("text-decoration:underline");
+    if (dim) styles.push("opacity:.7");
+    return styles.length ? `<span style="${styles.join(";")}">` : "<span>";
+  };
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      if (parts[i]) html += openSpan() + escapeHtml(parts[i]) + "</span>";
+    } else {
+      const codes = parts[i] === "" ? [0] : parts[i].split(";").map(Number);
+      for (const code of codes) {
+        if (code === 0) { color = null; bold = italic = underline = dim = false; }
+        else if (code === 1) bold = true;
+        else if (code === 2) dim = true;
+        else if (code === 3) italic = true;
+        else if (code === 4) underline = true;
+        else if (code === 22) { bold = false; dim = false; }
+        else if (code === 23) italic = false;
+        else if (code === 24) underline = false;
+        else if (code === 39) color = null;
+        else if (ANSI_COLORS[code]) color = ANSI_COLORS[code];
+      }
+    }
+  }
+  return html;
+}
+
 function log(text, kind) {
   const line = document.createElement("div");
   if (kind) line.className = "line-" + kind;
-  line.textContent = text;
+  if (text.indexOf("\x1b[") !== -1) {
+    line.innerHTML = ansiToHtml(text);
+  } else {
+    line.textContent = text;
+  }
   consoleEl.appendChild(line);
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 el("btn-clear-log").addEventListener("click", () => (consoleEl.textContent = ""));
 
 // ---------------------------------------------------------------------
-// Rendering
+// Rendering: board settings, libraries, files, tabs
 // ---------------------------------------------------------------------
 function renderBoards() {
   boardSelect.innerHTML = BOARDS.map((b) => `<option value="${b.id}">${b.label}</option>`).join("");
@@ -190,55 +257,94 @@ function renderTabs() {
   });
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// ---------------------------------------------------------------------
+// Editor: CodeMirror 6, styled to match VS Code Dark+.
+//
+// One EditorView instance persists for the app's lifetime. Switching
+// files replaces its EditorState entirely (view.setState), which both
+// swaps the document and gives each file its own independent undo
+// history — editing test.cpp shouldn't let you undo into sketch.ino.
+// ---------------------------------------------------------------------
+const vsDarkUi = EditorView.theme(
+  {
+    "&": { backgroundColor: "var(--bg)", color: "#d4d4d4", height: "100%", fontSize: "13px" },
+    ".cm-content": { fontFamily: "var(--mono)", caretColor: "#aeafad", padding: "10px 0" },
+    ".cm-scroller": { fontFamily: "var(--mono)", lineHeight: "1.6" },
+    "&.cm-focused .cm-cursor": { borderLeftColor: "#aeafad" },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": { backgroundColor: "#264f78" },
+    ".cm-gutters": { backgroundColor: "var(--bg)", color: "#858585", border: "none" },
+    ".cm-activeLineGutter": { backgroundColor: "#2a2d2e", color: "#c6c6c6" },
+    ".cm-activeLine": { backgroundColor: "rgba(255,255,255,0.04)" },
+    ".cm-matchingBracket, .cm-nonmatchingBracket": { backgroundColor: "#3a3d41", outline: "1px solid #565656" },
+    ".cm-foldPlaceholder": { backgroundColor: "transparent", border: "none", color: "#6a6a6a" },
+  },
+  { dark: true },
+);
+
+// Token colors, mapped from the real tags @lezer/cpp's grammar emits
+// (checked directly in its source) to VS Code Dark+'s actual palette —
+// e.g. "if/for/return" are pink #C586C0 while "int/const/class" are blue
+// #569CD6, exactly as VS Code splits control-flow from storage keywords.
+const vsDarkHighlight = HighlightStyle.define([
+  { tag: t.controlKeyword, color: "#C586C0" },
+  { tag: t.processingInstruction, color: "#C586C0" }, // #include, #define, ...
+  { tag: t.definitionKeyword, color: "#569CD6" }, // struct, class, namespace, using...
+  { tag: t.modifier, color: "#569CD6" }, // const, static, virtual...
+  { tag: t.operatorKeyword, color: "#569CD6" }, // new, sizeof, delete
+  { tag: t.null, color: "#569CD6" },
+  { tag: t.self, color: "#569CD6" }, // this
+  { tag: t.bool, color: "#569CD6" },
+  { tag: t.standard(t.typeName), color: "#569CD6" }, // int, char, void, bool...
+  { tag: t.typeName, color: "#4EC9B0" }, // user-defined types (Servo, String...)
+  { tag: t.namespace, color: "#4EC9B0" },
+  { tag: t.propertyName, color: "#9CDCFE" },
+  { tag: t.function(t.propertyName), color: "#DCDCAA" },
+  { tag: t.variableName, color: "#9CDCFE" },
+  { tag: t.function(t.variableName), color: "#DCDCAA" },
+  { tag: t.function(t.definition(t.variableName)), color: "#DCDCAA" },
+  { tag: t.labelName, color: "#C8C8C8" },
+  { tag: [t.lineComment, t.blockComment], color: "#6A9955", fontStyle: "italic" },
+  { tag: t.number, color: "#B5CEA8" },
+  { tag: t.literal, color: "#B5CEA8" },
+  { tag: [t.string, t.special(t.string), t.character], color: "#CE9178" },
+  { tag: t.escape, color: "#D7BA7D" },
+  { tag: t.meta, color: "#9CDCFE" },
+  { tag: t.special(t.name), color: "#4FC1FF" }, // macro names
+]);
+
+let cmView = null;
+
+function editorExtensions() {
+  return [
+    basicSetup, // line numbers, history, bracket matching + auto-closing, active-line highlight, etc.
+    keymap.of([indentWithTab]), // Tab/Shift+Tab indent-select; not in basicSetup by default
+    cpp(),
+    vsDarkUi,
+    syntaxHighlighting(vsDarkHighlight, { fallback: true }),
+    EditorView.updateListener.of((update) => {
+      if (update.docChanged) {
+        const f = activeFile();
+        if (f) f.content = update.state.doc.toString();
+        scheduleSave();
+      }
+    }),
+  ];
 }
 
-// ---------------------------------------------------------------------
-// Editor (a textarea with a synced line-number gutter, kept deliberately
-// simple rather than pulling in a full editor component)
-// ---------------------------------------------------------------------
 function loadFileIntoEditor() {
   const f = activeFile();
-  editor.value = f ? f.content : "";
-  updateGutter();
+  const state = EditorState.create({ doc: f ? f.content : "", extensions: editorExtensions() });
+  if (cmView) cmView.setState(state);
+  else cmView = new EditorView({ state, parent: editorHost });
 }
-
-function updateGutter() {
-  const lines = editor.value.split("\n").length;
-  let out = "";
-  for (let i = 1; i <= lines; i++) out += i + "\n";
-  gutter.textContent = out;
-}
-
-editor.addEventListener("scroll", () => (gutter.scrollTop = editor.scrollTop));
-
-editor.addEventListener("keydown", (ev) => {
-  if (ev.key === "Tab") {
-    ev.preventDefault();
-    const start = editor.selectionStart, end = editor.selectionEnd;
-    editor.value = editor.value.slice(0, start) + "  " + editor.value.slice(end);
-    editor.selectionStart = editor.selectionEnd = start + 2;
-    updateGutter();
-    scheduleSave();
-  }
-});
 
 let saveTimer = null;
-editor.addEventListener("input", () => {
-  updateGutter();
-  const f = activeFile();
-  if (f) f.content = editor.value;
-  scheduleSave();
-});
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveProject, 400);
 }
 
 function switchFile(name) {
-  const f = activeFile();
-  if (f) f.content = editor.value; // capture edits before switching away
   project.activeFile = name;
   loadFileIntoEditor();
   renderFiles();
@@ -268,8 +374,7 @@ function addFile(name) {
     log(`${name} already exists.`, "error");
     return;
   }
-  const isHeader = /\.(h|hpp)$/i.test(name);
-  project.files.push({ name, content: isHeader ? "" : "" });
+  project.files.push({ name, content: "" });
   project.activeFile = name;
   loadFileIntoEditor();
   renderFiles();
@@ -347,8 +452,6 @@ el("btn-new").addEventListener("click", () => {
 // Export / import as .zip
 // ---------------------------------------------------------------------
 el("btn-export").addEventListener("click", async () => {
-  const f = activeFile();
-  if (f) f.content = editor.value;
   const zip = new JSZip();
   for (const file of project.files) zip.file(file.name, file.content);
   zip.file(
@@ -415,9 +518,6 @@ function setBuildState(state) {
 }
 
 btnCompile.addEventListener("click", async () => {
-  const f = activeFile();
-  if (f) f.content = editor.value;
-
   if (!project.files.some((x) => /\.ino$/i.test(x.name))) {
     log("Add a .ino file before compiling.", "error");
     return;
@@ -586,6 +686,51 @@ btnMonitor.addEventListener("click", async () => {
     monitorPort = null;
     btnMonitor.textContent = "Monitor";
   }
+});
+
+// ---------------------------------------------------------------------
+// Collapsible sidebar
+// ---------------------------------------------------------------------
+const railEl = el("rail");
+const railToggleBtn = el("btn-toggle-rail");
+
+function setRailCollapsed(collapsed) {
+  railEl.classList.toggle("collapsed", collapsed);
+  railToggleBtn.setAttribute("aria-pressed", String(collapsed));
+  localStorage.setItem("waffle32:railCollapsed", collapsed ? "1" : "0");
+}
+railToggleBtn.addEventListener("click", () => setRailCollapsed(!railEl.classList.contains("collapsed")));
+setRailCollapsed(localStorage.getItem("waffle32:railCollapsed") === "1");
+
+// ---------------------------------------------------------------------
+// Resizable console drawer — drag the handle above the console
+// ---------------------------------------------------------------------
+const resizeHandle = el("drawer-resize-handle");
+const savedHeight = Number(localStorage.getItem("waffle32:consoleHeight"));
+if (savedHeight) consoleEl.style.height = savedHeight + "px";
+
+resizeHandle.addEventListener("pointerdown", (ev) => {
+  ev.preventDefault();
+  resizeHandle.setPointerCapture(ev.pointerId);
+  resizeHandle.classList.add("active");
+  const startY = ev.clientY;
+  const startH = consoleEl.getBoundingClientRect().height;
+
+  function onMove(e) {
+    const delta = startY - e.clientY; // dragging up = taller
+    const max = window.innerHeight * 0.78;
+    const newH = Math.min(Math.max(startH + delta, 60), max);
+    consoleEl.style.height = newH + "px";
+  }
+  function onUp() {
+    resizeHandle.releasePointerCapture(ev.pointerId);
+    resizeHandle.classList.remove("active");
+    resizeHandle.removeEventListener("pointermove", onMove);
+    resizeHandle.removeEventListener("pointerup", onUp);
+    localStorage.setItem("waffle32:consoleHeight", String(Math.round(consoleEl.getBoundingClientRect().height)));
+  }
+  resizeHandle.addEventListener("pointermove", onMove);
+  resizeHandle.addEventListener("pointerup", onUp);
 });
 
 // ---------------------------------------------------------------------
