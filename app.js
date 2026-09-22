@@ -333,9 +333,16 @@ function editorExtensions() {
 
 function loadFileIntoEditor() {
   const f = activeFile();
-  const state = EditorState.create({ doc: f ? f.content : "", extensions: editorExtensions() });
-  if (cmView) cmView.setState(state);
-  else cmView = new EditorView({ state, parent: editorHost });
+  try {
+    const state = EditorState.create({ doc: f ? f.content : "", extensions: editorExtensions() });
+    if (cmView) cmView.setState(state);
+    else cmView = new EditorView({ state, parent: editorHost });
+  } catch (err) {
+    // Surface editor setup failures into our own console panel, since a
+    // silent failure here is otherwise only visible in devtools.
+    log("Editor failed to load: " + err.message, "error");
+    console.error(err);
+  }
 }
 
 let saveTimer = null;
