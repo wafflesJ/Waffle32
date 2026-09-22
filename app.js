@@ -11,19 +11,38 @@ import {
 } from "https://unpkg.com/esptool-js@0.7.0/bundle.js";
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 
-// CodeMirror 6, loaded unbundled from jsDelivr's ESM CDN. These are pinned
-// to major version only (not exact patches) so that jsDelivr's internal
-// cross-package dependency resolution — @codemirror/view importing
-// @codemirror/state, etc. — converges on the same resolved module for
-// everyone, which matters because CodeMirror relies on class/Facet
-// identity being consistent across its sub-packages.
-import { EditorView, basicSetup } from "https://cdn.jsdelivr.net/npm/codemirror@6/+esm";
-import { EditorState } from "https://cdn.jsdelivr.net/npm/@codemirror/state@6/+esm";
-import { keymap } from "https://cdn.jsdelivr.net/npm/@codemirror/view@6/+esm";
-import { indentWithTab } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
-import { syntaxHighlighting, HighlightStyle } from "https://cdn.jsdelivr.net/npm/@codemirror/language@6/+esm";
-import { cpp } from "https://cdn.jsdelivr.net/npm/@codemirror/lang-cpp@6/+esm";
-import { tags as t } from "https://cdn.jsdelivr.net/npm/@lezer/highlight@1/+esm";
+// CodeMirror 6, loaded unbundled from esm.sh. The first attempt at this
+// used jsDelivr's /+esm endpoint with each package pinned separately, but
+// that let @codemirror/view's *internal* copy of @codemirror/state resolve
+// to a different underlying module than the one imported here directly —
+// CodeMirror's extension system checks object identity, so two "copies" of
+// the same package (even the same version) made it reject every extension
+// with "Unrecognized extension value". esm.sh's `?deps=` query exists
+// specifically to force a whole dependency tree onto one pinned version
+// per package, so every import below — direct or transitive — resolves to
+// the exact same module.
+const CM_DEPS = [
+  "codemirror@6.0.2",
+  "@codemirror/state@6.7.6",
+  "@codemirror/view@6.43.13",
+  "@codemirror/commands@6.11.1",
+  "@codemirror/language@6.12.4",
+  "@codemirror/lang-cpp@6.0.3",
+  "@codemirror/autocomplete@6.20.3",
+  "@lezer/common@1.5.2",
+  "@lezer/highlight@1.2.3",
+  "@lezer/cpp@1.1.6",
+  "@lezer/lr@1.4.10",
+].join(",");
+const cmUrl = (pkg) => `https://esm.sh/${pkg}?deps=${CM_DEPS}`;
+
+const { EditorView, basicSetup } = await import(cmUrl("codemirror@6.0.2"));
+const { EditorState } = await import(cmUrl("@codemirror/state@6.7.6"));
+const { keymap } = await import(cmUrl("@codemirror/view@6.43.13"));
+const { indentWithTab } = await import(cmUrl("@codemirror/commands@6.11.1"));
+const { syntaxHighlighting, HighlightStyle } = await import(cmUrl("@codemirror/language@6.12.4"));
+const { cpp } = await import(cmUrl("@codemirror/lang-cpp@6.0.3"));
+const { tags: t } = await import(cmUrl("@lezer/highlight@1.2.3"));
 
 // ---- point this at your own Worker if you fork this project ----
 const RELAY_URL = "https://esp-relay.waffle32.workers.dev";
